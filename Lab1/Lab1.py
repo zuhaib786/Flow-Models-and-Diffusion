@@ -1,7 +1,7 @@
 import marimo
 
 __generated_with = "0.20.1"
-app = marimo.App(width="medium")
+app = marimo.App(width="medium", auto_download=["ipynb"])
 
 
 @app.cell
@@ -939,8 +939,7 @@ def _(
         scale=15
     )   
 
-
-    return nmodes, std, target
+    return (target,)
 
 
 @app.cell
@@ -1007,7 +1006,7 @@ def _(
             kdeplot_ax.set_xlabel("")
             kdeplot_ax.set_ylabel("")
             camera.snap()
-    
+
         animation = camera.animate()
         animation.save(save_path)
         plt.close()
@@ -1025,14 +1024,12 @@ def _(
     LangevinSDE,
     animate_dynamics,
     device,
-    nmodes,
-    std,
     target,
     torch,
 ):
     # OPTIONAL CELL
     # Construct the simulator
-    new_target = GaussianMixture.symmetric_2D(nmodes=nmodes, std=std, scale=15.0).to(device)
+    new_target = GaussianMixture.symmetric_2D(nmodes=5, std=0.5, scale=15.0).to(device)
     new_sde = LangevinSDE(sigma = 0.6, density = target)
     new_simulator = EulerMaruyamaSimulator(new_sde)
 
@@ -1047,7 +1044,6 @@ def _(
         scale=15,
         animate_every=100
     )   
-
     return
 
 
