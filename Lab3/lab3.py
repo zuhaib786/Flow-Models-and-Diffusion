@@ -1,7 +1,7 @@
 import marimo
 
 __generated_with = "0.20.2"
-app = marimo.App(width="medium")
+app = marimo.App(width="medium", auto_download=["ipynb"])
 
 
 @app.cell
@@ -47,7 +47,7 @@ def _():
     from torchvision.utils import make_grid
     from einops import rearrange
     from einops.layers.torch import Rearrange
-
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     return (
         ABC,
         List,
@@ -57,6 +57,7 @@ def _():
         Type,
         abstractmethod,
         datasets,
+        device,
         jacrev,
         make_grid,
         math,
@@ -64,6 +65,7 @@ def _():
         os,
         plt,
         random,
+        rearrange,
         torch,
         tqdm,
         transforms,
@@ -719,7 +721,7 @@ def _(ABC, ODE, SDE, abstractmethod, torch, tqdm):
             ]
         )
 
-    return
+    return (EulerSimulator,)
 
 
 @app.cell(hide_code=True)
@@ -970,12 +972,12 @@ def _(
         num_rows = 3
         num_cols = 3
         num_timesteps = 5
-    
+
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    
+
         # Initialize our sampler
         sampler = MNISTSampler().to(device)
-    
+
         # Initialize probability path
         path = GaussianConditionalProbabilityPath(
             p_data = MNISTSampler(),
@@ -983,15 +985,15 @@ def _(
             alpha = LinearAlpha(),
             beta = LinearBeta()
         ).to(device)
-    
+
         # Sample
         num_samples = num_rows * num_cols
         z, _ = path.p_data.sample(num_samples)
         z = z.view(-1, 1, 32, 32)
-    
+
         # Setup plot
         fig, axes = plt.subplots(1, num_timesteps, figsize=(6 * num_cols * num_timesteps, 6 * num_rows))
-    
+
         # Sample from conditional probability paths and graph
         ts = torch.linspace(0, 1, num_timesteps).to(device)
         for tidx, t in enumerate(ts):
@@ -1103,7 +1105,7 @@ def _(ABC, ODE, abstractmethod, nn, torch):
                 1 - self.guidance_scale
             ) * unguided_vector_field + self.guidance_scale * guided_vector_field
 
-    return (ConditionalVectorField,)
+    return CFGVectorFieldODE, ConditionalVectorField
 
 
 @app.cell(hide_code=True)
@@ -1152,7 +1154,7 @@ def _(GaussianConditionalProbabilityPath, Trainer, nn, torch):
             predictions = self.model(x, t, y)
             targets = self.path.conditional_vector_field(x, z, t)
             return nn.functional.mse_loss(predictions, targets)
-        
+
 
     return (CFGTrainer,)
 
@@ -1213,9 +1215,9 @@ def _(ConditionalVectorField, List, Type, nn, torch):
                 dim=-1,
             )
             return self.mlp(inp)
-        
 
-    return (MLPConditionalVectorField,)
+
+    return MLP, MLPConditionalVectorField
 
 
 @app.cell(hide_code=True)
@@ -1235,6 +1237,7 @@ def _(
     LinearAlpha,
     LinearBeta,
     MLPConditionalVectorField,
+    device,
     math,
     plt,
     torch,
@@ -1243,9 +1246,6 @@ def _(
         #######################################################################
         # Train MLP-based Conditional Vector Field to target Gaussian mixture #
         #######################################################################
-
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
         # Initialize GMM
         angles = [0, 2 * math.pi / 3, 4 * math.pi / 3]
         means = 2 * torch.tensor([[math.cos(a), math.sin(a)] for a in angles])
@@ -1302,7 +1302,7 @@ def _(mo):
 
 
 @app.cell
-def _(freq, nn, torch):
+def _(nn, torch):
     class FourierEncoder(nn.Module):
         """
         Based on https://github.com/lucidrains/denoising-diffusion-pytorch/blob/main/denoising_diffusion_pytorch/karras_unet.py#L183
@@ -1326,13 +1326,13 @@ def _(freq, nn, torch):
             freqs = 2 * torch.pi * t * self.weights  # b x (d/2)
 
             # Step 2: compute sin(f_i) and cos(f_i)
-            sin_freq = torch.sin(freq)
-            cos_freq = torch.cos(freq)
+            sin_freq = torch.sin(freqs)
+            cos_freq = torch.cos(freqs)
 
             # Step 3: Concatenate and return
             return torch.cat([cos_freq, sin_freq], dim=-1)
 
-    return
+    return (FourierEncoder,)
 
 
 @app.cell(hide_code=True)
@@ -1372,11 +1372,11 @@ def _(Rearrange, nn, torch):
         """
         # 2. Do whatver you need to do with whatever you initialized!
         return self.net(x)
-    
 
 
 
-    return
+
+    return (Patchifier,)
 
 
 @app.cell(hide_code=True)
@@ -1402,7 +1402,7 @@ def _(mo):
 
 
 @app.cell
-def _(nn, torch):
+def _(MLP, Rearrange, nn, rearrange, torch):
     class MHA(nn.Module):
         """
         Multi-headed self-attention
@@ -1411,8 +1411,13 @@ def _(nn, torch):
         def __init__(self, dim: int, heads: int):
             super().__init__()
             assert dim % heads == 0
-
-            raise NotImplementedError("Implement me in Question 3.3!")
+            self.scale = (dim // heads) ** -0.5  # 1/sqrt(d_q)
+            self.qkv = nn.Linear(
+                dim, 3 * dim
+            )  # query vector for each head --> shape (d/h  x 1) --> final shape 3 * dim
+            self.fold_heads = Rearrange("b n (h d) -> (b h) n d", h=heads)
+            self.unfold_heads = Rearrange("(b h) n d -> b n (h d)", h=heads)
+            self.out = nn.Linear(dim, dim)
 
         def forward(self, x: torch.Tensor) -> torch.Tensor:
             """
@@ -1422,24 +1427,25 @@ def _(nn, torch):
             - x: b n d
             """
             # 1. Compute queries, keys, and values
-            pass
+            q, k, v = self.qkv(x).chunk(3, dim=-1)  # Shape: b n (h d)
 
             # 2. Fold head into batch dimension
-            pass
+            q, k, v = map(self.fold_heads, (q, k, v))  # shape : (b h) n d
 
             # 3. Compute attention
-            pass
+            #  step 1: Computed scaled dot product qk^T
+            qk = torch.einsum("bid, bjd -> bij", q, k) * self.scale  # (b h) n n
+            # step 2: Apply softmax to get attention weights
+            attn = torch.softmax(qk, dim=-1)  # (b h) n n
 
             # 4. Combine with values
-            pass
+            v = torch.einsum("bik,bkj -> bij", attn, v)  # shape: (b h) n d
 
             # 5. Unfold heads
-            pass
-
+            v = self.unfold_heads(v)  # shape b n (h d)
             # 6. Pass throuh FF and return
-            pass
 
-            raise NotImplementedError("Implement me in Question 3.3!")
+            return self.out(v)
 
 
     class DiffusionTransformerLayer(nn.Module):
@@ -1455,9 +1461,15 @@ def _(nn, torch):
             - heads: number of attention heads
             """
             super().__init__()
-
-            # Initialize whatever you need here!
-            raise NotImplementedError("Implement me in Question 3.3!")
+            self.cond_mlp = nn.Sequential(
+                nn.RMSNorm(dim, elementwise_affine=False), nn.Linear(dim, dim * 6)
+            )
+            nn.init.zeros_(self.cond_mlp[1].weight)
+            nn.init.zeros_(self.cond_mlp[1].bias)
+            self.mha = MHA(dim, heads)
+            self.norm1 = nn.RMSNorm(dim, elementwise_affine=False)
+            self.norm2 = nn.RMSNorm(dim, elementwise_affine=False)
+            self.ff = MLP([dim, 4 * dim, dim])
 
         def forward(self, x: torch.Tensor, c: torch.Tensor) -> torch.Tensor:
             """
@@ -1468,12 +1480,15 @@ def _(nn, torch):
             - x: b n d
             """
             # 1. Compute conditioning gating, scaling, and bias
-            pass
+            c = rearrange(self.cond_mlp(c), "b d -> b 1 d")
+            g1, s1, b1, g2, s2, b2 = c.chunk(6, dim=-1)
 
-            # 2. Attention + FF
-            pass
+            # 2. Attention
+            x = x + g1 * self.mha(self.norm1(x) + (x + s1 * x + b1))
+            # 3. Feed foward
 
-            raise NotImplementedError("Implement me in Question 3.3!")
+            x = x + g2 * self.ff(self.norm2(x) + (x + s2 * x + b2))
+            return x
 
 
     class DiffusionTransformer(nn.Module):
@@ -1494,7 +1509,10 @@ def _(nn, torch):
             super().__init__()
 
             # Initialize DiT layers + positional encodings
-            raise NotImplementedError("Implement me in Question 3.3!")
+            self.pos_embedding = nn.Parameter(torch.randn(n_tokens, dim))
+            self.layers = nn.ModuleList([])
+            for _ in range(depth):
+                self.layers.append(DiffusionTransformerLayer(dim, **layer_kwargs))
 
         def forward(self, x: torch.Tensor, c: torch.Tensor) -> torch.Tensor:
             """
@@ -1505,13 +1523,347 @@ def _(nn, torch):
             - x: b n d
             """
             # 1. Add encodings to x
-            pass
+            x = x + self.pos_embedding.unsqueeze(0)
 
             # 2. Pass through DiT layers
-            pass
+            for layer in self.layers:
+                x = layer(x, c)
+            return x
 
-            raise NotImplementedError("Implement me in Question 3.3!")
+    return (DiffusionTransformer,)
 
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ### Question 3.4 Depatchifier
+    After the diffusion transformer, we need to convert from `b n d` back to `b 1 h w`.
+
+    **Your job:** Implement `Depatchifier`.
+
+    **Hints**: One approach would be to
+    1. Start with some sort of normalization. `nn.LayerNorm` or `nn.RMSNorm` wil suffice.
+    2. Pass through some MLP to obtain `b (h/p w/p) (f p p)` (ie, map to dimension $d=fp^2$, for patch size $p$ and "final dimension" $f$.
+    3. Rearrange to `b f h w`.
+    4. Pass through final convolution to obtain output of shape `b 1 h w`.
+    """)
+    return
+
+
+@app.cell
+def _(MLP, Rearrange, nn, torch):
+    class Depatchifier(nn.Module):
+        def __init__(
+            self, img_size: int, patch_size: int, dim: int, final_dim: int = 10
+        ):
+            super().__init__()
+            self.patch_size = patch_size
+            assert img_size % patch_size == 0, (
+                "Image size must be divisible by patch size"
+            )
+            h = w = img_size // patch_size
+            self.net = nn.Sequential(
+                nn.RMSNorm(dim, elementwise_affine=False),
+                MLP([dim, 4 * dim, final_dim * patch_size * patch_size]),
+                Rearrange(
+                    "b (h w) (f ph pw) -> b f (h ph) (w pw)",
+                    h=h,
+                    w=w,
+                    f=final_dim,
+                    ph=patch_size,
+                    pw=patch_size,
+                ),
+                nn.Conv2d(final_dim, 1, kernel_size=3, padding=1),
+            )
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """
+            Args:
+            - x: b n d
+            Returns:
+            - x: b 1 32 32
+            """
+            return self.net(x)
+
+    return (Depatchifier,)
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ### Question 3.5: Putting It All Together
+    Finally, let's implement our DiT-based guided flow model $u_t^\theta(x|y)$ with the class `MNISTDiffusionTransformer`.
+
+    **Your job**: Implement `MNISTDiffusionTransformer`.
+
+    **Hint**:
+    1. To embed the guiding input `y`, you'll need class labels. You can reuse your solution from `MLPConditionalVectorField`. In particular, we recommend using `nn.Embedding(num_classes=11, embedding_dim=dim)`. Note we use 11 - not 10 - classes to account for the presence of the null label.
+    2. Follow the DiT overview diagram: embed $t$ and $y$, add them together to obtain the guiding variable. Pass $x$ through the patchifier, and then pass the patchifier output and $t + y$ through the diffusion transformer. Finally, pass the DiT output through the depatchifier.
+    """)
+    return
+
+
+@app.cell
+def _(
+    ConditionalVectorField,
+    Depatchifier,
+    DiffusionTransformer,
+    FourierEncoder,
+    Patchifier,
+    nn,
+    torch,
+):
+    class MNISTDiffusionTransformer(ConditionalVectorField):
+      def __init__(
+          self,
+          patch_size: int = 8,
+          num_layers: int = 12,
+          dim: int = 256,
+          heads: int = 4,
+        ):
+          super().__init__()
+          # 0. Construct time_embedder and y_embedder
+          self.time_embedder = FourierEncoder(dim)
+          self.y_encoder = nn.Embedding(num_embeddings = 11, embedding_dim = dim)
+
+          # 1. Construct patchifier
+          self.patchifier = Patchifier(32, patch_size, dim)
+
+          # 2. Construct DiT
+          n_tokens = (32//patch_size) ** 2
+          self.dit = DiffusionTransformer(num_layers, n_tokens, dim, heads = heads)
+
+          # 3. Construct de-patchifier
+          self.depatchifier = Depatchifier(32, patch_size, dim)
+
+
+
+      def forward(self, x: torch.Tensor, t: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+        - x: b 1 32 32
+        - t: b 1 1 1
+        - c: b 1 1 1
+        Returns:
+        - u_t^theta(x|y): b 1 32 32
+        """
+        # 1. Embed time and y
+        t_emb, y_emb = self.time_embedder(t), self.y_encoder(y)
+
+        # 2. Patchify
+        x = self.patchifier(x)
+
+        # 3. Pass through DiT
+        x = self.dit(x, t_emb + y_emb)
+
+        # 4. Depatchify
+        x = self.depatchifier(x)
+
+        return x
+
+    return (MNISTDiffusionTransformer,)
+
+
+@app.cell
+def _(
+    CFGTrainer,
+    CFGVectorFieldODE,
+    EulerSimulator,
+    List,
+    Optional,
+    device,
+    make_grid,
+    os,
+    plt,
+    torch,
+):
+    ##################
+    # Training utils #
+    ##################
+
+
+    def visualize_output(
+        model,
+        path,
+        samples_per_class: int = 10,
+        num_timesteps: int = 100,
+        guidance_scales: List[float] = [1.0, 3.0, 5.0],
+        save_path: Optional[str] = None,
+        use_tqdm: bool = True,
+    ):
+        # Graph
+
+        fig, axes = plt.subplots(
+            1, len(guidance_scales), figsize=(10 * len(guidance_scales), 10)
+        )
+
+        for idx, w in enumerate(guidance_scales):
+            # Setup ode and simulator
+            ode = CFGVectorFieldODE(model, guidance_scale=w, null_label=10)
+            simulator = EulerSimulator(ode)
+
+            # Sample initial conditions
+            y = (
+                torch.tensor([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10], dtype=torch.int64)
+                .repeat_interleave(samples_per_class)
+                .to(device)
+            )
+            num_samples = y.shape[0]
+            x0 = path.p_simple.sample(num_samples)  # (num_samples, 1, 32, 32)
+
+            # Simulate
+            ts = (
+                torch.linspace(0, 0.999, num_timesteps)
+                .view(1, -1, 1, 1, 1)
+                .expand(num_samples, -1, 1, 1, 1)
+                .to(device)
+            )
+            x1 = simulator.simulate(x0, ts, y=y, use_tqdm=use_tqdm)
+
+            # Plot
+            v_min, v_max = x1.min(), x1.max()
+            x1 = (x1 - v_min) / (v_max - v_min)
+            grid = make_grid(
+                x1, nrow=samples_per_class, normalize=True, value_range=(0, 1)
+            )
+            axes[idx].imshow(grid.permute(1, 2, 0).cpu(), cmap="gray")
+            axes[idx].axis("off")
+            axes[idx].set_title(f"Guidance: $w={w:.1f}$", fontsize=25)
+
+        # Save
+        if save_path is not None:
+            plt.savefig(save_path)
+            plt.close()
+        else:
+            plt.show()
+
+
+    class MNISTCFGTrainer(CFGTrainer):
+        """
+        CFG Trainer with MNIST-specific callback
+        """
+
+        def checkpoint(self, step: int):
+            # Save model
+            torch.save(
+                self.model.state_dict(),
+                os.path.join(self.output_dir, f"step_{step:6d}_model.pt"),
+            )
+            torch.save(
+                self.opt.state_dict(),
+                os.path.join(self.output_dir, f"step_{step:6d}_opt.pt"),
+            )
+
+            # Save output visualization
+            visualize_output(
+                self.model,
+                self.path,
+                save_path=os.path.join(
+                    self.output_dir, f"step_{step:6d}_output.png"
+                ),
+                use_tqdm=False,
+            )
+
+    return MNISTCFGTrainer, visualize_output
+
+
+@app.cell
+def _(
+    GaussianConditionalProbabilityPath,
+    LinearAlpha,
+    LinearBeta,
+    MNISTCFGTrainer,
+    MNISTDiffusionTransformer,
+    MNISTSampler,
+    device,
+    plt,
+):
+    #################
+    # Training code #
+    #################
+    def train_and_visualize_dit():
+        # Initialize probability path
+        path = GaussianConditionalProbabilityPath(
+            p_data = MNISTSampler(),
+            p_simple_shape = [1, 32, 32],
+            alpha = LinearAlpha(),
+            beta = LinearBeta()
+        ).to(device)
+
+        # Initialize model
+        dit = MNISTDiffusionTransformer(
+            patch_size = 4,
+            num_layers = 8,
+            dim = 256,
+            heads = 8,
+        ).to(device)
+
+        # Initialize trainer
+        trainer = MNISTCFGTrainer(path = path, eta=0.35, null_label=10)
+
+        # Train! You should have reasonable results in ~15 A100 minutes
+        losses, steps = trainer.train(model=dit, num_steps = 20000, lr=0.4e-3, batch_size=256, ckpt_every=1000)
+
+        plt.plot(steps, losses)
+        plt.xlabel("Step")
+        plt.ylabel("Loss")
+        plt.title("Loss vs. Step")
+        plt.show()
+
+    # train_and_visualize_dit()
+    return
+
+
+@app.cell
+def _(
+    GaussianConditionalProbabilityPath,
+    LinearAlpha,
+    LinearBeta,
+    MNISTDiffusionTransformer,
+    MNISTSampler,
+    device,
+    plt,
+    torch,
+    visualize_output,
+):
+    samples_per_class = 10
+    num_timesteps = 100
+    path = GaussianConditionalProbabilityPath(
+            p_data = MNISTSampler(),
+            p_simple_shape = [1, 32, 32],
+            alpha = LinearAlpha(),
+            beta = LinearBeta()
+        ).to(device)
+    dit = MNISTDiffusionTransformer(
+            patch_size = 4,
+            num_layers = 8,
+            dim = 256,
+            heads = 8,
+        ).to(device)
+
+    dit.load_state_dict(torch.load("runs/step_ 19000_model.pt", weights_only=True, map_location=torch.device('cpu')))
+    guidance_scales = [1.0, 3.0, 5.0]
+
+    visualize_output(
+        model=dit,
+        path=path,
+        samples_per_class=samples_per_class,
+        num_timesteps=num_timesteps,
+        guidance_scales=guidance_scales,
+    )
+    plt.show()
+
+
+    return
+
+
+@app.cell
+def _():
+    return
+
+
+@app.cell
+def _():
     return
 
 
